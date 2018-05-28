@@ -23,6 +23,8 @@ pub struct Server {
         Sender<(SocketAddr, Vec<u8>)>,
         Receiver<(SocketAddr, Vec<u8>)>,
     ),
+    hs_to_dst: HashMap<ConnectionId, ConnectionId>,
+    dst_to_hs: HashMap<ConnectionId, ConnectionId>,
 }
 
 impl Server {
@@ -37,6 +39,8 @@ impl Server {
             in_buf: vec![0u8; 65536],
             connections: HashMap::new(),
             send_queue: mpsc::channel(5),
+            hs_to_dst: HashMap::new(),
+            dst_to_hs: HashMap::new(),
         })
     }
 
@@ -54,28 +58,45 @@ impl Server {
             (partial.dst_cid(), partial.header.ptype())
         };
 
-        let cid = if ptype == Some(LongType::Initial) {
-            let mut state = ConnectionState::new(
-                tls::server_session(&self.tls_config, &ServerTransportParameters::default()),
-                Some(Secret::Handshake(dst_cid)),
-            );
-
-            let cid = state.pick_unused_cid(|cid| connections.contains_key(&cid));
-            let (recv_tx, recv_rx) = mpsc::channel(5);
-            tokio::executor::current_thread::spawn(
-                Box::new(Connection::new(
-                    addr,
-                    state,
-                    self.send_queue.0.clone(),
-                    recv_rx,
-                )).map_err(|e| {
-                    error!("error spawning connection: {:?}", e);
-                }),
-            );
-            connections.insert(cid, recv_tx);
-            cid
-        } else {
+        let cid = if ptype == None {
             dst_cid
+        } else if ptype != Some(LongType::Initial) {
+            match self.dst_to_hs.remove(&dst_cid) {
+                Some(hs_cid) => {
+                    self.hs_to_dst.remove(&hs_cid);
+                }
+                None => {}
+            }
+            dst_cid
+        } else {
+            match self.hs_to_dst.get(&dst_cid) {
+                Some(cid) => cid.clone(),
+                None => {
+                    let mut state = ConnectionState::new(
+                        tls::server_session(
+                            &self.tls_config,
+                            &ServerTransportParameters::default(),
+                        ),
+                        Some(Secret::Handshake(dst_cid)),
+                    );
+
+                    let cid =
+                        state.pick_unused_cid(|cid| connections.contains_key(&cid));
+                    let (recv_tx, recv_rx) = mpsc::channel(5);
+                    tokio::executor::current_thread::spawn(
+                        Box::new(Connection::new(
+                            addr,
+                            state,
+                            self.send_queue.0.clone(),
+                            recv_rx,
+                        )).map_err(|e| {
+                            error!("error spawning connection: {:?}", e);
+                        }),
+                    );
+                    connections.insert(cid, recv_tx);
+                    cid
+                }
+            }
         };
 
         match connections.entry(cid) {
@@ -228,5 +249,33 @@ impl Future for Connection {
             }
         }
         Ok(Async::NotReady)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Server;
+    use conn_state::tests::client_conn_state;
+    use tls::tests::server_config;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_multi_initials() {
+        let mut server = Server::new("127.0.0.1", 4434, server_config()).unwrap();
+        let mut exec = CurrentThread::new();
+        exec.spawn(server.map_err(|_| ()));
+        let mut c = client_conn_state();
+        c.initial().unwrap();
+        let mut initial = c.queued().unwrap().unwrap().clone();
+        c.pop_queue();
+
+        let client_addr = SocketAddr::from(([127, 0, 0, 1], 12345));
+        server.in_buf[..initial.len()].copy_from_slice(&initial);
+        server.received(client_addr, initial.len());
+        server.received(client_addr, initial.len());
+
+        let next = server.poll_next();
+        let next = server.poll_next();
+        let next = server.poll_next();
     }
 }
