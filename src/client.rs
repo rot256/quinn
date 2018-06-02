@@ -120,11 +120,25 @@ impl Future for ConnectFuture {
 
 #[cfg(test)]
 mod tests {
+    use QuicError;
     use conn_state::tests::client_conn_state;
-    use futures::Future;
+    use futures::{task, Async, Future, Poll};
     use server::Server;
     use tls::tests::server_config;
     use tokio::runtime::current_thread::Runtime;
+
+    #[test]
+    fn test_negotiate_version() {
+        let server = Server::new("127.0.0.1", 4434, server_config()).unwrap();
+        let client = super::Client::with_state("127.0.0.1", 4433, client_conn_state()).unwrap();
+        let mut received = vec![];
+        let test = TestClient {
+            client,
+            received: &mut |client, packet: &[u8]| {
+                received.push(packet.to_vec());
+            },
+        };
+    }
 
     #[test]
     fn test_client_connect_resolves() {
@@ -134,5 +148,33 @@ mod tests {
         let mut exec = Runtime::new().unwrap();
         exec.spawn(server.map_err(|_| ()));
         exec.block_on(connector).unwrap();
+    }
+
+    struct TestClient<'a, T>
+    where
+        T: FnMut(&super::Client, &[u8]) + 'a,
+    {
+        client: super::Client,
+        received: &'a mut T,
+    }
+
+    impl<'a, T> Future for TestClient<'a, T>
+    where
+        T: FnMut(&super::Client, &[u8]) + 'a,
+    {
+        type Item = ();
+        type Error = QuicError;
+        fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+            self.client.conn_state.streams.set_task(task::current());
+            loop {
+                match self.client.poll_send() {
+                    Ok(Async::Ready(())) | Ok(Async::NotReady) => {}
+                    e @ Err(_) => try_ready!(e),
+                }
+                let len = try_ready!(self.client.socket.poll_recv(&mut self.client.buf));
+                (self.received)(&self.client, &self.client.buf[..len]);
+                self.client.conn_state.handle(&mut self.client.buf[..len])?;
+            }
+        }
     }
 }
