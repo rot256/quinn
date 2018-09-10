@@ -10,11 +10,36 @@ use crypto::Secret;
 use parameters::{ClientTransportParameters, ServerTransportParameters};
 use types::Side;
 
+use rustls;
+
 use webpki::{DNSNameRef, TLSServerTrustAnchors};
 use webpki_roots;
 
 pub use rustls::{Certificate, PrivateKey};
 pub use rustls::{ClientConfig, ClientSession, ServerConfig, ServerSession, Session};
+
+pub struct ConstantCacheClient {
+    value : Vec<u8>
+}
+
+impl ConstantCacheClient {
+    fn new(value: Vec<u8>) -> ConstantCacheClient {
+        ConstantCacheClient {
+            value
+        }
+    }
+}
+
+impl rustls::StoresClientSessions for ConstantCacheClient {
+    fn put(&self, _key: Vec<u8>, _value: Vec<u8>) -> bool {
+        false
+    }
+
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        println!("retrying to resolve: {:?}:", key);
+        Some(self.value.clone())
+    }
+}
 
 pub fn client_session(
     config: Option<ClientConfig>,
@@ -40,6 +65,16 @@ pub fn build_client_config(anchors: Option<&TLSServerTrustAnchors>) -> ClientCon
     config
 }
 
+pub fn build_client_config_psk(psk : Vec<u8>) -> ClientConfig {
+    let mut config = ClientConfig::new();
+    let persist = Arc::new(ConstantCacheClient::new(psk.clone()));
+    config.versions = vec![ProtocolVersion::TLSv1_3];
+    config.alpn_protocols = vec![ALPN_PROTOCOL.into()];
+    config.set_persistence(persist);
+    config.key_log = Arc::new(KeyLogFile::new());
+    config
+}
+
 pub fn server_session(
     config: &Arc<ServerConfig>,
     params: &ServerTransportParameters,
@@ -54,6 +89,23 @@ pub fn build_server_config(
     let mut config = ServerConfig::new(NoClientAuth::new());
     config.set_protocols(&[ALPN_PROTOCOL.into()]);
     config.set_single_cert(cert_chain, key)?;
+    config.ciphersuites = vec![
+        rustls::ALL_CIPHERSUITES[1],
+    ];
+    config.key_log = Arc::new(KeyLogFile::new());
+    Ok(config)
+}
+
+pub fn build_server_config_psk(
+    key: PrivateKey,
+    psk: Vec<u8>,
+) -> QuicResult<ServerConfig> {
+    let mut config = ServerConfig::new(NoClientAuth::new());
+    config.set_persistence(
+        rustls::ServerSessionConstant::new(psk)
+    );
+    config.set_protocols(&[ALPN_PROTOCOL.into()]);
+    config.set_single_cert(vec![], key)?;
     config.key_log = Arc::new(KeyLogFile::new());
     Ok(config)
 }

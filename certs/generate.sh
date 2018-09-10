@@ -3,7 +3,7 @@
 set -xe
 openssl req -nodes \
           -x509 \
-          -newkey rsa:8192 \
+          -newkey rsa:4092 \
           -keyout ca.key \
           -out ca.crt \
           -sha256 \

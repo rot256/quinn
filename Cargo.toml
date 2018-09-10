@@ -22,8 +22,10 @@ webpki = "0.18"
 webpki-roots = "0.15"
 
 [dependencies.rustls]
-git = "https://github.com/ctz/rustls"
+# git = "https://github.com/rot256/rustls"
 features = ["quic"]
+# branch = "master"
+path = "/home/rot256/src/rustls"
 
 [dev-dependencies]
 env_logger = "0.5"
