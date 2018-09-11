@@ -2,7 +2,7 @@ use rustls::quic::{ClientQuicExt, ServerQuicExt};
 use rustls::{KeyLogFile, NoClientAuth, ProtocolVersion, TLSError};
 
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::{QuicError, QuicResult};
 use codec::Codec;
@@ -10,34 +10,107 @@ use crypto::Secret;
 use parameters::{ClientTransportParameters, ServerTransportParameters};
 use types::Side;
 
+use std::collections;
 use rustls;
 
 use webpki::{DNSNameRef, TLSServerTrustAnchors};
 use webpki_roots;
 
+pub use rustls::{SupportedCipherSuite};
 pub use rustls::{Certificate, PrivateKey};
+pub use rustls::{ClientSessionValue, ServerSessionValue};
 pub use rustls::{ClientConfig, ClientSession, ServerConfig, ServerSession, Session};
 
-pub struct ConstantCacheClient {
-    value : Vec<u8>
+static SUITE : usize = 1;
+
+pub struct SingleCacheClient {
+    value : Mutex<Vec<u8>>
 }
 
-impl ConstantCacheClient {
-    fn new(value: Vec<u8>) -> ConstantCacheClient {
-        ConstantCacheClient {
-            value
+mod danger {
+    use rustls;
+    use webpki;
+
+    pub struct NoCertificateVerification {}
+
+    impl rustls::ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(&self,
+                              _roots: &rustls::RootCertStore,
+                              _presented_certs: &[rustls::Certificate],
+                              _dns_name: webpki::DNSNameRef,
+                              _ocsp: &[u8]) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
+            Ok(rustls::ServerCertVerified::assertion())
         }
     }
 }
 
-impl rustls::StoresClientSessions for ConstantCacheClient {
-    fn put(&self, _key: Vec<u8>, _value: Vec<u8>) -> bool {
-        false
+impl SingleCacheClient {
+    fn new() -> Arc<SingleCacheClient> {
+        Arc::new(SingleCacheClient {
+            value: Mutex::new(vec![]),
+        })
+    }
+}
+
+struct ClientSessionMemoryCache {
+    cache: Mutex<collections::HashMap<Vec<u8>, Vec<u8>>>,
+    max_entries: usize,
+}
+
+impl ClientSessionMemoryCache {
+    /// Make a new ClientSessionMemoryCache.  `size` is the maximum
+    /// number of stored sessions.
+    pub fn new(size: usize) -> Arc<ClientSessionMemoryCache> {
+        debug_assert!(size > 0);
+        Arc::new(ClientSessionMemoryCache {
+            cache: Mutex::new(collections::HashMap::new()),
+            max_entries: size,
+        })
+    }
+
+    fn limit_size(&self) {
+        let mut cache = self.cache.lock().unwrap();
+        println!("ClientSessionMemoryCache, size: {}", cache.len());
+        while cache.len() > self.max_entries {
+            let k = cache.keys().next().unwrap().clone();
+            cache.remove(&k);
+        }
+    }
+}
+
+impl rustls::StoresClientSessions for ClientSessionMemoryCache {
+
+    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
+        println!("ClientSessionMemoryCache, put: {:?}", key.clone());
+        self.cache.lock()
+            .unwrap()
+            .insert(key, value);
+        self.limit_size();
+        true
     }
 
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        println!("retrying to resolve: {:?}:", key);
-        Some(self.value.clone())
+        println!("ClientSessionMemoryCache, get: {:?}", key.clone());
+        let res = self.cache.lock()
+            .unwrap()
+            .get(key).cloned();
+        res
+    }
+}
+
+
+impl rustls::StoresClientSessions for SingleCacheClient {
+    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
+        println!("SingleCacheClient, store: {:?} -> {:?}", key, &value);
+        let mut guard = self.value.lock().unwrap();
+        *guard = value;
+        true
+    }
+
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let guard = self.value.lock().unwrap();
+        println!("SingleCacheClient, fetch: {:?} -> {:?}", key, guard.clone());
+        Some(guard.clone())
     }
 }
 
@@ -65,12 +138,14 @@ pub fn build_client_config(anchors: Option<&TLSServerTrustAnchors>) -> ClientCon
     config
 }
 
-pub fn build_client_config_psk(psk : Vec<u8>) -> ClientConfig {
+pub fn build_client_config_psk() -> ClientConfig {
     let mut config = ClientConfig::new();
-    let persist = Arc::new(ConstantCacheClient::new(psk.clone()));
     config.versions = vec![ProtocolVersion::TLSv1_3];
+    // config.ciphersuites = vec![rustls::ALL_CIPHERSUITES[SUITE]];
     config.alpn_protocols = vec![ALPN_PROTOCOL.into()];
-    config.set_persistence(persist);
+    config.dangerous().set_certificate_verifier(Arc::new(danger::NoCertificateVerification {}));
+    config.set_persistence(ClientSessionMemoryCache::new(256));
+    config.enable_tickets = true;
     config.key_log = Arc::new(KeyLogFile::new());
     config
 }
@@ -87,26 +162,22 @@ pub fn build_server_config(
     key: PrivateKey,
 ) -> QuicResult<ServerConfig> {
     let mut config = ServerConfig::new(NoClientAuth::new());
+    config.key_log = Arc::new(KeyLogFile::new());
     config.set_protocols(&[ALPN_PROTOCOL.into()]);
     config.set_single_cert(cert_chain, key)?;
-    config.ciphersuites = vec![
-        rustls::ALL_CIPHERSUITES[1],
-    ];
-    config.key_log = Arc::new(KeyLogFile::new());
     Ok(config)
 }
 
 pub fn build_server_config_psk(
+    cert_chain: Vec<Certificate>,
     key: PrivateKey,
-    psk: Vec<u8>,
 ) -> QuicResult<ServerConfig> {
     let mut config = ServerConfig::new(NoClientAuth::new());
-    config.set_persistence(
-        rustls::ServerSessionConstant::new(psk)
-    );
-    config.set_protocols(&[ALPN_PROTOCOL.into()]);
-    config.set_single_cert(vec![], key)?;
     config.key_log = Arc::new(KeyLogFile::new());
+    config.set_persistence(rustls::ServerSessionMemoryCache::new(256));
+    config.set_protocols(&[ALPN_PROTOCOL.into()]);
+    config.set_single_cert(cert_chain, key)?;
+    // config.ciphersuites = vec![rustls::ALL_CIPHERSUITES[SUITE]];
     Ok(config)
 }
 
