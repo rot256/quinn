@@ -24,14 +24,14 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(ip: &str, port: u16, tls_config: tls::ServerConfig) -> QuicResult<Self> {
+    pub fn new(ip: &str, port: u16, tls_config: Arc<tls::ServerConfig>) -> QuicResult<Self> {
         let addr = (ip, port)
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| QuicError::General("no address found for host".into()))?;
         Ok(Server {
             socket: UdpSocket::bind(&addr)?,
-            tls_config: Arc::new(tls_config),
+            tls_config: tls_config,
             in_buf: vec![0u8; 65536],
             connections: HashMap::new(),
             send_queue: mpsc::channel(5),

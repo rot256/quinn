@@ -115,39 +115,38 @@ impl rustls::StoresClientSessions for SingleCacheClient {
 }
 
 pub fn client_session(
-    config: Option<ClientConfig>,
+    config: Option<Arc<ClientConfig>>,
     hostname: &str,
     params: &ClientTransportParameters,
 ) -> QuicResult<ClientSession> {
     let pki_server_name = DNSNameRef::try_from_ascii_str(hostname)
         .map_err(|_| QuicError::InvalidDnsName(hostname.into()))?;
     Ok(ClientSession::new_quic(
-        &Arc::new(config.unwrap_or_else(|| build_client_config(None))),
+        &config.unwrap_or_else(|| build_client_config(None)),
         pki_server_name,
         to_vec(params),
     ))
 }
 
-pub fn build_client_config(anchors: Option<&TLSServerTrustAnchors>) -> ClientConfig {
+pub fn build_client_config(anchors: Option<&TLSServerTrustAnchors>) -> Arc<ClientConfig> {
     let mut config = ClientConfig::new();
     let anchors = anchors.unwrap_or(&webpki_roots::TLS_SERVER_ROOTS);
     config.root_store.add_server_trust_anchors(anchors);
     config.versions = vec![ProtocolVersion::TLSv1_3];
     config.alpn_protocols = vec![ALPN_PROTOCOL.into()];
     config.key_log = Arc::new(KeyLogFile::new());
-    config
+    Arc::new(config)
 }
 
-pub fn build_client_config_psk() -> ClientConfig {
+pub fn build_client_config_psk() -> Arc<ClientConfig> {
     let mut config = ClientConfig::new();
+    config.key_log = Arc::new(KeyLogFile::new());
     config.versions = vec![ProtocolVersion::TLSv1_3];
-    // config.ciphersuites = vec![rustls::ALL_CIPHERSUITES[SUITE]];
     config.alpn_protocols = vec![ALPN_PROTOCOL.into()];
+    // config.ciphersuites = vec![rustls::ALL_CIPHERSUITES[SUITE]];
     config.dangerous().set_certificate_verifier(Arc::new(danger::NoCertificateVerification {}));
     config.set_persistence(ClientSessionMemoryCache::new(256));
-    config.enable_tickets = true;
-    config.key_log = Arc::new(KeyLogFile::new());
-    config
+    Arc::new(config)
 }
 
 pub fn server_session(
@@ -160,25 +159,25 @@ pub fn server_session(
 pub fn build_server_config(
     cert_chain: Vec<Certificate>,
     key: PrivateKey,
-) -> QuicResult<ServerConfig> {
+) -> QuicResult<Arc<ServerConfig>> {
     let mut config = ServerConfig::new(NoClientAuth::new());
     config.key_log = Arc::new(KeyLogFile::new());
     config.set_protocols(&[ALPN_PROTOCOL.into()]);
     config.set_single_cert(cert_chain, key)?;
-    Ok(config)
+    Ok(Arc::new(config))
 }
 
 pub fn build_server_config_psk(
     cert_chain: Vec<Certificate>,
     key: PrivateKey,
-) -> QuicResult<ServerConfig> {
+) -> QuicResult<Arc<ServerConfig>> {
     let mut config = ServerConfig::new(NoClientAuth::new());
     config.key_log = Arc::new(KeyLogFile::new());
+    // config.ciphersuites = vec![rustls::ALL_CIPHERSUITES[SUITE]];
     config.set_persistence(rustls::ServerSessionMemoryCache::new(256));
     config.set_protocols(&[ALPN_PROTOCOL.into()]);
     config.set_single_cert(cert_chain, key)?;
-    // config.ciphersuites = vec![rustls::ALL_CIPHERSUITES[SUITE]];
-    Ok(config)
+    Ok(Arc::new(config))
 }
 
 pub fn process_handshake_messages<T>(session: &mut T, msgs: Option<&[u8]>) -> QuicResult<TlsResult>

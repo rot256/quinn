@@ -6,6 +6,7 @@ use parameters::ClientTransportParameters;
 use streams::Streams;
 use tls;
 
+use std::sync::{Arc, Mutex};
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use tokio::net::UdpSocket;
@@ -26,7 +27,7 @@ impl Client {
     pub fn connect_with_tls_config(
         server: &str,
         port: u16,
-        config: tls::ClientConfig,
+        config: Arc<tls::ClientConfig>,
     ) -> QuicResult<ConnectFuture> {
         ConnectFuture::new(Self::new(server, port, Some(config))?)
     }
@@ -35,7 +36,7 @@ impl Client {
     pub(crate) fn new(
         server: &str,
         port: u16,
-        config: Option<tls::ClientConfig>,
+        config: Option<Arc<tls::ClientConfig>>,
     ) -> QuicResult<Client> {
         let tls = tls::client_session(
             config,
